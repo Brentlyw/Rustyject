@@ -4,6 +4,7 @@ A Rust based shellcode injector, utilizes XOR encryption and the gargoyle techni
 # Features
 - XOR encryption .py script (formats msfvenom to rust byte array)
 - XOR decryption just-in-time before injection
+- Function pointers for memory calls (helps w/ static)
 - Gargoyle technique with variable delay
 - Dynamically targets explorer.exe
 - Can easily be modified to be evasive, and have very low detections.
