@@ -1,5 +1,5 @@
 # Rustyject
-A Rust based shellcode injector, utilizes XOR encryption and the gargoyle technique.
+A Rust based shellcode injector, utilizes XOR encryption, function pointers, and the gargoyle technique.
 
 # Features
 - XOR encryption .py script (formats msfvenom to rust byte array)
