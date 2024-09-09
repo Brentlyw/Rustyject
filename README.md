@@ -1,16 +1,22 @@
 # Rustyject
-A Rust based shellcode injector, utilizes XOR encryption, function pointers, and the gargoyle technique.
+An undetected Rust based shellcode injector. 
 
 # Features
-- XOR encryption .py script (formats msfvenom to rust byte array)
-- XOR decryption just-in-time before injection
-- Function pointers for memory calls (helps w/ static)
+- **Custom encoding of the payload**
+  - The payload is stored as an array of 3 character strings.
+  - The first two characters come from a defined alphabet, these are used to construct an *intermediate byte*
+  - The first character is found in the alphabet, and it's index shifted left by 4 bits (*16), *representing the higher nibble of the byte.*
+  - The second character is also found in the alphabet, it's value is used directly as the *lower nibble of the byte.*
+  - These nibbles are combined using a bitwise OR operation to form the *complete byte.*
+  - The complete byte is XORed with the ASCII value of the third character - which is the *final encoded byte.*
+- **XOR decryption reverses this and is performed just-in-time before injection**
+  - Decryption and injection is performed byte-by-byte as to never store the entire decoded payload in memory.
+- Function pointers for memory calls
 - Gargoyle technique with variable delay
-- Dynamically targets explorer.exe
-- Can easily be modified to be evasive, and have very low detections.
+- Dynamically targets explorer's PID
 
 # Note
-This is NOT designed to be evasive, have low detections, etc. 
+This proof of concept project is meant to be educational, please keep it that way and do no harm.
 
-# Scans
-[https://www.virustotal.com/gui/file/5c122d32e0c85e887d264bce7fac076d8c783f7d661235ea9c2f174e07d0a0b9?nocache=1](https://www.virustotal.com/gui/file/114df112928620ca953b40d85cf9fa163cfbdbe2640ff342f633841cd2fc5ada?nocache=1)
+# Detection Rate?
+As of late August 2024, 2/75 via Virustotal.
